@@ -19,14 +19,15 @@ logging.basicConfig(level=logging.INFO)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    logger.info(f"Starting in {settings.ENV} environment")
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
             await conn.execute(text("SELECT 1"))
             db_status.is_ready = True
-            logger.info("Database connection successful on startup and tables verified")
+            logger.info("Database connected successfully on startup — tables verified")
     except Exception as e:
-        logger.warning(f"Database connection failed on startup: {e}")
+        logger.error(f"Database connection failed on startup: {type(e).__name__}: {e}")
         db_status.is_ready = False
 
     reconnect_task = asyncio.create_task(db_reconnect_task())
