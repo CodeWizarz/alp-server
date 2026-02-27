@@ -5,6 +5,9 @@ from fastapi import FastAPI
 from sqlalchemy import text
 from app.core.config import settings
 from app.db.session import engine
+from app.api.ingest import router as ingest_router
+from app.db.base import Base
+import app.models.execution  # Import models to ensure they align with Base
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -34,10 +37,11 @@ async def db_reconnect_task():
 async def lifespan(app: FastAPI):
     global db_ready
     try:
-        async with engine.connect() as conn:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
             await conn.execute(text("SELECT 1"))
             db_ready = True
-            logger.info("Database connection successful on startup")
+            logger.info("Database connection successful on startup and tables verified")
     except Exception as e:
         logger.warning(f"Database connection failed on startup: {e}")
         db_ready = False
@@ -50,6 +54,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
+app.include_router(ingest_router, prefix="/v1")
 
 
 @app.on_event("startup")

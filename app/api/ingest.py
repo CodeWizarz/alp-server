@@ -1,74 +1,54 @@
-from fastapi import APIRouter, Request, Depends, Response
-from app.api.auth import verify_api_key
-
-from app.models.ingestion import IngestionPayload
-from app.services.ingestion_service import IngestionService
+import asyncio
 import logging
+from typing import List
+from fastapi import APIRouter, Header, HTTPException, status
+from app.schemas.execution import ExecutionEventCreate
+from app.models.execution import ExecutionEvent
+from app.db.session import async_session_maker
 
-logger = logging.getLogger("temporallayr.api.ingest")
+logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["Ingestion"])
+router = APIRouter()
 
-
-# Global singleton dependencies injected over route layouts dynamically per app instance.
-def get_ingestion_service() -> IngestionService:
-    from app.main import ingestion_service
-
-    return ingestion_service
+# Limit concurrent inserts to 10 to respect the connection pool bounds (pool=5, max_overflow=10)
+CONN_SEMAPHORE = asyncio.Semaphore(10)
 
 
-@router.post("/ingest")
-async def ingest(
-    request: Request,
-    response: Response,
-    payload: IngestionPayload,
-    service: IngestionService = Depends(get_ingestion_service),
+async def _insert_single_event(event_in: ExecutionEventCreate):
+    async with CONN_SEMAPHORE:
+        async with async_session_maker() as session:
+            db_event = ExecutionEvent(**event_in.model_dump())
+            session.add(db_event)
+            await session.commit()
+
+
+@router.post("/ingest", status_code=status.HTTP_202_ACCEPTED)
+async def ingest_events(
+    events: List[ExecutionEventCreate],
+    x_api_key: str = Header(..., alias="X-API-Key"),
+    x_tenant_id: str = Header(..., alias="X-Tenant-ID"),
 ):
-    if getattr(request.app.state, "db_status", "unknown") != "connected":
-        response.headers["X-DB-Status"] = getattr(
-            request.app.state, "db_status", "unknown"
-        )
-        return {
-            "status": "accepted",
-            "ingested": len(payload.events),
-            "message": "Database disconnected. Events dropped.",
-        }
-    """
-    Ingest arrays of execution context mappings parsing nested traces.
-    Accepts auth via Authorization: Bearer <key> header OR body api_key field.
-    """
-    # [DEBUG] Log raw auth inputs before validation
-    print(
-        f"[INGEST DEBUG]\n"
-        f"  header_auth={request.headers.get('authorization') or request.headers.get('Authorization')}\n"
-        f"  body_key={payload.api_key}"
-    )
-
-    # Auth: pass body key from parsed payload to avoid body double-read
-    tenant_id = await verify_api_key(request, api_key_from_body=payload.api_key)
+    if len(events) > 100:
+        raise HTTPException(status_code=400, detail="Maximum 100 events per request")
 
     logger.info(
-        "INGEST_RECEIVED",
-        extra={
-            "event_count": len(payload.events),
-            "tenant": tenant_id,
-        },
+        f"Received {len(events)} events for tenant {x_tenant_id} using api {x_api_key}"
     )
-    print(f"[INGEST RECEIVED] events={len(payload.events)} tenant={tenant_id}")
 
-    if not payload.events:
-        return {
-            "status": "ok",
-            "ingested": 0,
-            "message": "No events provided in payload array.",
-        }
+    tasks = [_insert_single_event(evt) for evt in events]
+    # Gather exceptions if insert fails, but allowing successful ones to pass isn't fully required, gather is enough
+    results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    # Note: Tenant ID handling inside the enqueue can be null or a fixed tenant if not present
-    tenant_id = payload.tenant_id if hasattr(payload, "tenant_id") else "tenant_default"
-    await service.enqueue(tenant_id, payload.events)
+    # Check if any tasks failed to log
+    failed = [res for res in results if isinstance(res, Exception)]
+    if failed:
+        logger.error(
+            f"Failed to insert some events: {len(failed)} errors. First error: {failed[0]}"
+        )
+        # Consider handling full failure vs partial success; for now, log and return 202
 
     return {
         "status": "accepted",
-        "ingested": len(payload.events),
-        "message": "Events successfully queued for background flushing explicitly.",
+        "ingested": len(events) - len(failed),
+        "errors": len(failed),
     }
