@@ -1,7 +1,8 @@
 import asyncio
 import logging
 from typing import List
-from fastapi import APIRouter, Header, HTTPException, status
+from fastapi import APIRouter, Header, HTTPException, status, Depends
+from app.core.auth import verify_auth
 from app.schemas.execution import ExecutionEventCreate
 from app.models.execution import ExecutionEvent
 from app.db.session import async_session_maker
@@ -24,16 +25,12 @@ async def _insert_single_event(event_in: ExecutionEventCreate):
 
 @router.post("/ingest", status_code=status.HTTP_202_ACCEPTED)
 async def ingest_events(
-    events: List[ExecutionEventCreate],
-    x_api_key: str = Header(..., alias="X-API-Key"),
-    x_tenant_id: str = Header(..., alias="X-Tenant-ID"),
+    events: List[ExecutionEventCreate], tenant_id: str = Depends(verify_auth)
 ):
     if len(events) > 100:
         raise HTTPException(status_code=400, detail="Maximum 100 events per request")
 
-    logger.info(
-        f"Received {len(events)} events for tenant {x_tenant_id} using api {x_api_key}"
-    )
+    logger.info(f"Received {len(events)} events for tenant {tenant_id}")
 
     tasks = [_insert_single_event(evt) for evt in events]
     # Gather exceptions if insert fails, but allowing successful ones to pass isn't fully required, gather is enough
