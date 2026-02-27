@@ -4,51 +4,32 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from sqlalchemy import text
 from app.core.config import settings
-from app.db.session import engine
-from app.api.ingest import router as ingest_router
+from app.db.session import engine, db_status, db_reconnect_task
+from app.api.ingest import router as ingest_router, ingestion_worker_task
 from app.db.base import Base
 import app.models.execution  # Import models to ensure they align with Base
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-db_ready = False
-
-
-async def db_reconnect_task():
-    global db_ready
-    while True:
-        await asyncio.sleep(30)
-        try:
-            async with engine.connect() as conn:
-                await conn.execute(text("SELECT 1"))
-                if not db_ready:
-                    db_ready = True
-                    logger.info(
-                        "Database connection established/recovered in background"
-                    )
-        except Exception:
-            if db_ready:
-                db_ready = False
-                logger.warning("Database connection lost in background check")
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global db_ready
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
             await conn.execute(text("SELECT 1"))
-            db_ready = True
+            db_status.is_ready = True
             logger.info("Database connection successful on startup and tables verified")
     except Exception as e:
         logger.warning(f"Database connection failed on startup: {e}")
-        db_ready = False
+        db_status.is_ready = False
 
-    task = asyncio.create_task(db_reconnect_task())
+    reconnect_task = asyncio.create_task(db_reconnect_task())
+    queue_worker_task = asyncio.create_task(ingestion_worker_task())
     yield
-    task.cancel()
+    reconnect_task.cancel()
+    queue_worker_task.cancel()
     await engine.dispose()
     logger.info("Database engine disposed")
 
@@ -71,4 +52,4 @@ async def startup_event():
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok", "db": "connected" if db_ready else "disconnected"}
+    return {"status": "ok", "db": "connected" if db_status.is_ready else "disconnected"}
