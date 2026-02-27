@@ -55,11 +55,13 @@ async def lifespan(app: FastAPI):
 
 from app.api.auth_test import router as auth_test_router
 from app.api.stats import router as stats_router
+from app.api.query import router as query_router
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
 app.include_router(ingest_router, prefix="/v1")
 app.include_router(auth_test_router, prefix="/v1")
 app.include_router(stats_router, prefix="/v1")
+app.include_router(query_router, prefix="/v1")
 
 
 @app.on_event("startup")
