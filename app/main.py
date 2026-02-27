@@ -1,11 +1,55 @@
 import logging
+import asyncio
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from sqlalchemy import text
 from app.core.config import settings
+from app.db.session import engine
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-app = FastAPI(title=settings.app_name)
+db_ready = False
+
+
+async def db_reconnect_task():
+    global db_ready
+    while True:
+        await asyncio.sleep(30)
+        try:
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+                if not db_ready:
+                    db_ready = True
+                    logger.info(
+                        "Database connection established/recovered in background"
+                    )
+        except Exception:
+            if db_ready:
+                db_ready = False
+                logger.warning("Database connection lost in background check")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global db_ready
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+            db_ready = True
+            logger.info("Database connection successful on startup")
+    except Exception as e:
+        logger.warning(f"Database connection failed on startup: {e}")
+        db_ready = False
+
+    task = asyncio.create_task(db_reconnect_task())
+    yield
+    task.cancel()
+    await engine.dispose()
+    logger.info("Database engine disposed")
+
+
+app = FastAPI(title=settings.app_name, lifespan=lifespan)
 
 
 @app.on_event("startup")
@@ -15,4 +59,4 @@ async def startup_event():
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok"}
+    return {"status": "ok", "db": "connected" if db_ready else "disconnected"}
