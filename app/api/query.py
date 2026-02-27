@@ -15,15 +15,21 @@ router = APIRouter()
 async def query_events(
     request: QueryRequest, response: Response, tenant_id: str = Depends(verify_auth)
 ):
+    # Debug: log the full incoming request so we can inspect what dashboard sends
+    logger.info(
+        f"Query request received from tenant={tenant_id}: {request.model_dump()}"
+    )
+
     if not db_status.is_ready:
         response.headers["X-DB-Status"] = "disconnected"
         return QueryResponse(items=[], total=0)
 
     try:
         async with async_session_maker() as session:
-            # Base query combining filters
+            # tenant_id always comes from auth headers, not the request body
             query = select(ExecutionEvent).where(ExecutionEvent.tenant_id == tenant_id)
 
+            # Structured filter fields
             if request.start_time:
                 query = query.where(ExecutionEvent.timestamp >= request.start_time)
             if request.end_time:
@@ -34,6 +40,13 @@ async def query_events(
                 )
             if request.status:
                 query = query.where(ExecutionEvent.status == request.status)
+
+            # Freeform query string: treat as a function_name partial match if
+            # no structured filters are present (simple NL-style dashboard search)
+            if request.query and not request.function_name and not request.status:
+                query = query.where(
+                    ExecutionEvent.function_name.ilike(f"%{request.query}%")
+                )
 
             # Total count query for identical filter set
             count_query = select(func.count()).select_from(query.subquery())
@@ -53,5 +66,5 @@ async def query_events(
             )
     except Exception as e:
         logger.error(f"Error querying events: {e}")
-        response.headers["X-DB-Status"] = "disconnected"
+        response.headers["X-DB-Status"] = "error"
         return QueryResponse(items=[], total=0)
