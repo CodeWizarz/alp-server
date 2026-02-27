@@ -30,6 +30,25 @@ async def lifespan(app: FastAPI):
         logger.error(f"Database connection failed on startup: {type(e).__name__}: {e}")
         db_status.is_ready = False
 
+        # Immediate retry before handing over to the 30s background task
+        async def _startup_retry():
+            for attempt in range(1, 4):
+                await asyncio.sleep(5)
+                try:
+                    async with engine.begin() as conn:
+                        await conn.run_sync(Base.metadata.create_all)
+                        await conn.execute(text("SELECT 1"))
+                    db_status.is_ready = True
+                    logger.info(f"Database connected on startup retry #{attempt}")
+                    return
+                except Exception as retry_err:
+                    logger.error(
+                        f"Startup retry #{attempt} failed: "
+                        f"{type(retry_err).__name__}: {retry_err}"
+                    )
+
+        asyncio.create_task(_startup_retry())
+
     reconnect_task = asyncio.create_task(db_reconnect_task())
     queue_worker_task = asyncio.create_task(ingestion_worker_task())
     yield

@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from typing import List
-from fastapi import APIRouter, Header, HTTPException, status, Depends, Response
+from fastapi import APIRouter, HTTPException, status, Depends, Response
 from app.core.auth import verify_auth
 from app.schemas.execution import ExecutionEventCreate
 from app.models.execution import ExecutionEvent
@@ -19,14 +19,15 @@ CONN_SEMAPHORE = asyncio.Semaphore(10)
 
 
 async def _insert_single_event_with_session(event_in: ExecutionEventCreate, session):
-    db_event = ExecutionEvent(**event_in.model_dump())
+    data = event_in.model_dump()
+    # Ensure tenant_id is always set (stamped from auth headers upstream)
+    db_event = ExecutionEvent(**data)
     session.add(db_event)
 
 
 async def ingestion_worker_task():
     while True:
         try:
-            # Batch process events when DB is ready
             batch = []
             while not ingestion_queue.empty() and len(batch) < 100:
                 batch.append(await ingestion_queue.get())
@@ -45,15 +46,12 @@ async def ingestion_worker_task():
                             )
                     except Exception as e:
                         logger.error(f"Background worker failed to flush events: {e}")
-                        # Push them back to the queue (simple retry logic)
                         for ev in batch:
                             await ingestion_queue.put(ev)
             elif batch and not db_status.is_ready:
-                # DB still down, put them back
                 for ev in batch:
                     await ingestion_queue.put(ev)
 
-            # Wait a bit before checking queue again to avoid spinning if DB is down but queue has items
             await asyncio.sleep(1)
         except asyncio.CancelledError:
             break
@@ -71,7 +69,14 @@ async def ingest_events(
     if len(events) > 100:
         raise HTTPException(status_code=400, detail="Maximum 100 events per request")
 
+    from datetime import datetime, timezone
+
     for evt in events:
+        # Stamp tenant_id and timestamp server-side if client omitted them
+        if not evt.tenant_id:
+            evt.tenant_id = tenant_id
+        if not evt.timestamp:
+            evt.timestamp = datetime.now(timezone.utc)
         await ingestion_queue.put(evt)
 
     logger.info(f"Queued {len(events)} events for tenant {tenant_id}")

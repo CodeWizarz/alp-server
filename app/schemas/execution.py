@@ -5,9 +5,13 @@ from pydantic import BaseModel, ConfigDict
 
 
 class ExecutionEventCreate(BaseModel):
-    tenant_id: str
+    # tenant_id comes from X-Tenant-ID auth header — body may omit it
+    tenant_id: Optional[str] = None
     event_type: str
     payload: dict[str, Any]
+    timestamp: Optional[datetime] = (
+        None  # server sets this from model default if absent
+    )
     function_name: Optional[str] = None
     latency_ms: Optional[int] = None
     status: Optional[str] = None
