@@ -20,6 +20,15 @@ logging.basicConfig(level=logging.INFO)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info(f"Starting in {settings.ENV} environment")
+
+    # --- DB diagnostic: print what URL we have (credentials masked) ---
+    raw_url = settings.DATABASE_URL or "(NOT SET)"
+    if "@" in raw_url:
+        masked = "postgresql://<credentials>@" + raw_url.split("@", 1)[1]
+    else:
+        masked = raw_url
+    logger.info(f"DATABASE_URL raw (masked): {masked}")
+
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
@@ -28,6 +37,10 @@ async def lifespan(app: FastAPI):
             logger.info("Database connected successfully on startup — tables verified")
     except Exception as e:
         logger.error(f"Database connection failed on startup: {type(e).__name__}: {e}")
+        logger.error(
+            "Hint: ensure DATABASE_URL in Railway environment variables uses the "
+            "internal postgres.railway.internal hostname, not the public proxy URL."
+        )
         db_status.is_ready = False
 
         # Immediate retry before handing over to the 30s background task
